@@ -5,21 +5,39 @@ using UnityEngine;
 using UnityEditor;
 #endif
 
+public enum RaytracingMode
+{
+    RandomColors,
+    ResolutionRate
+}
+
 public class Raytracing : MonoBehaviour
 {
+    public RaytracingMode raytracingMode;
+
     public GameObject target;
     public RenderTexture result;
 
     public int pixelWidth, pixelHeight;
+    public int textureWidth, textureHeight;
 
     public Color backgroundColor;
+    public Color minColor;
+    public Color maxColor;
 
     private List<Color> triangleColors;
+
+    public float meanLower, meanUpper;
+
+    public float[] pixelTextureArea;
+    public int[] pixelResolutionByTriangle;
+    public float[] pixelResolutionRate;
+    public float[] pixelResolutionRateNormalized;
 
     [HideInInspector]
     public string filePath;
 
-    public void Raytrace()
+    public void RaytraceUsingRandomColors()
     {
         double initTime = EditorApplication.timeSinceStartup;
 
@@ -87,6 +105,231 @@ public class Raytracing : MonoBehaviour
             }
         }
         raytracedTexture.Apply();
+
+        byte[] textureBytes = raytracedTexture.EncodeToJPG();
+        System.IO.File.WriteAllBytes(filePath, textureBytes);
+
+        Graphics.Blit(raytracedTexture, result);
+
+        Debug.Log("GilLog - Raytracing::Raytrace - elapsed: " + (EditorApplication.timeSinceStartup - initTime));
+    }
+
+    public void RaytraceForResolutionRate()
+    {
+        double initTime = EditorApplication.timeSinceStartup;
+
+        Mesh mesh = target.GetComponent<MeshFilter>().sharedMesh;
+
+        Vector3[] vertices = mesh.vertices;
+        int[] triangles = mesh.triangles;
+        Vector2[] uvs = mesh.uv;
+
+        for (int v = 0; v < vertices.Length; v++)
+        {
+            vertices[v] = target.transform.TransformPoint(vertices[v]);
+        }
+
+        int totalTriangles = triangles.Length / 3;
+        triangleColors = new List<Color>();
+        for (int i = 0; i < totalTriangles; i++)
+        {
+            triangleColors.Add(
+                new Color(Random.Range(0, 255)*1.0f/255f, 
+                          Random.Range(0, 255)*1.0f/255f, 
+                          Random.Range(0, 255)*1.0f/255f, 
+                          1f)
+                );
+        }
+
+        pixelResolutionRate = new float[totalTriangles];
+        pixelResolutionRateNormalized = new float[totalTriangles];
+        pixelResolutionByTriangle = new int[totalTriangles];
+        for (int i = 0; i < totalTriangles; i++)
+        {
+            pixelResolutionByTriangle[i] = 0;
+        }
+
+        Vector3 size = new Vector3(textureWidth * 1.0f, textureHeight * 1.0f, 0f);
+
+        pixelTextureArea = new float[totalTriangles];
+        for (int i = 0; i < totalTriangles; i++)
+        {
+            Vector2 uv1 = uvs[triangles[3*i]];
+            Vector2 uv2 = uvs[triangles[3*i + 1]];
+            Vector2 uv3 = uvs[triangles[3*i + 2]];
+
+            Vector3 va = new Vector3(uv2.x - uv1.x, uv2.y - uv1.y, 0f);
+            Vector3 vb = new Vector3(uv3.x - uv1.x, uv3.y - uv1.y, 0f);
+
+            va = Vector3.Scale(va, size);
+            vb = Vector3.Scale(vb, size);
+
+            pixelTextureArea[i] = 0.5f * Vector3.Cross(va, vb).magnitude;
+        }
+
+        Camera camera = Camera.main;
+
+        Vector3 cameraPos = camera.transform.position;
+        Vector3 nearplanePos = cameraPos + camera.transform.forward * camera.nearClipPlane;
+
+        float heightSize = 2f * camera.nearClipPlane * Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.PI / 180f);
+        float widthSize = (pixelWidth * 1.0f / pixelHeight) * heightSize;
+
+        Debug.Log("GilLog - Raytracing::Raytrace - heightSize " + heightSize + "  - widthSize " + widthSize + " ");
+
+        Texture2D raytracedTexture = new Texture2D(pixelWidth, pixelHeight);
+        // result = new RenderTexture(pixelWidth, pixelHeight, 24, RenderTextureFormat.ARGB32);
+
+        Ray ray;
+
+        for (int x = 0; x < pixelWidth; x++)
+        {
+            for (int y = 0; y < pixelHeight; y++)
+            {
+                Vector3 pixelPos = ((x - 0.5f * pixelWidth)/pixelWidth) * widthSize * camera.transform.right +
+                    ((y - 0.5f * pixelHeight)/pixelHeight) * heightSize * camera.transform.up +
+                    nearplanePos;
+
+                ray = new Ray(cameraPos, pixelPos - cameraPos);
+
+                for (int i = 0; i < totalTriangles; i++)
+                {
+                    Vector3 v1 = vertices[triangles[3*i]];
+                    Vector3 v2 = vertices[triangles[3*i + 1]];
+                    Vector3 v3 = vertices[triangles[3*i + 2]];
+
+                    if (Intersect(v1, v2, v3, ray)) {
+                        pixelResolutionByTriangle[i] = pixelResolutionByTriangle[i] + 1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        float minLower = 1, maxLower = float.MinValue;
+        float minUpper = float.MaxValue, maxUpper = 1;
+
+        float meanLowerLower = 0f, meanLowerUpper = 0f;
+        int totalLowerLower = 0, totalLowerUpper = 0; 
+
+        int totalUpper = 0, totalLower = 0;
+
+        // Mean Lower 0.3344944
+
+        for (int i = 0; i < totalTriangles; i++)
+        {
+            if (pixelResolutionByTriangle[i] != 0f)
+            {
+                pixelResolutionRate[i] = pixelTextureArea[i]/pixelResolutionByTriangle[i];
+                if (pixelResolutionRate[i] <= 1f)
+               {
+                    if (pixelResolutionRate[i] < 0.3344944f)
+                    {
+                        meanLowerLower += pixelResolutionRate[i];
+                        totalLowerLower++;
+
+                    } else {
+                        meanLowerUpper += pixelResolutionRate[i];
+                        totalLowerUpper++;
+                    }
+                    
+                    totalLower++;
+
+                    if (pixelResolutionRate[i] < minLower)
+                    {
+                        minLower = pixelResolutionRate[i];
+                    }
+
+                    if (pixelResolutionRate[i] > maxLower)
+                    {
+                        maxLower = pixelResolutionRate[i];
+                    }
+               } else {
+                    meanUpper += pixelResolutionRate[i];
+                    totalUpper++;
+
+                    if (pixelResolutionRate[i] < minUpper)
+                    {
+                        minUpper = pixelResolutionRate[i];
+                    }
+
+                    if (pixelResolutionRate[i] > maxUpper)
+                    {
+                        maxUpper = pixelResolutionRate[i];
+                    }
+               }
+            }
+        }
+
+        meanLower = 0.3344944f;
+
+        meanLowerLower = meanLowerLower / totalLowerLower;
+        meanLowerUpper = meanLowerUpper / totalLowerUpper;
+
+        meanUpper = meanUpper / totalUpper;
+
+        float lowerInterval = 0.2f;
+        float upperInterval = 0.8f;
+
+        for (int i = 0; i < totalTriangles; i++)
+        {
+            if (pixelResolutionByTriangle[i] == 0)
+            {
+                pixelResolutionRateNormalized[i] = 0f;
+            } else {
+                if (pixelResolutionRateNormalized[i] <= meanLowerLower)
+                {
+                    pixelResolutionRateNormalized[i] = 0.25f*lowerInterval*(pixelResolutionRate[i] - minLower)/(meanLowerLower - minLower);
+                } else if (pixelResolutionRateNormalized[i] <= meanLower) 
+                {
+                    pixelResolutionRateNormalized[i] = 0.25f*lowerInterval + 0.25f*lowerInterval*(pixelResolutionRate[i] - meanLowerLower)/(meanLower - meanLowerLower);
+                } else if (pixelResolutionRateNormalized[i] <= meanLowerUpper)
+                {
+                    pixelResolutionRateNormalized[i] = 0.5f*lowerInterval + 0.25f*lowerInterval*(pixelResolutionRate[i] - meanLower)/(meanLowerUpper - meanLower);
+                } else if (pixelResolutionRateNormalized[i] <= 1f) 
+                {
+                    pixelResolutionRateNormalized[i] = 0.75f*lowerInterval + 0.25f*lowerInterval*(pixelResolutionRate[i] - meanLowerUpper)/(maxLower - meanLowerUpper);
+                } else if (pixelResolutionRateNormalized[i] <= meanUpper)
+                {
+                    pixelResolutionRateNormalized[i] = lowerInterval + 0.5f*upperInterval*(pixelResolutionRate[i] - minUpper)/(meanUpper - minUpper);
+                } else {
+                    pixelResolutionRateNormalized[i] = lowerInterval + 0.5f*upperInterval + 
+                        0.5f*upperInterval*(pixelResolutionRate[i] - meanUpper)/(maxUpper - meanUpper);
+                }
+            }       
+        }
+
+        for (int x = 0; x < pixelWidth; x++)
+        {
+            for (int y = 0; y < pixelHeight; y++)
+            {
+                Vector3 pixelPos = ((x - 0.5f * pixelWidth)/pixelWidth) * widthSize * camera.transform.right +
+                    ((y - 0.5f * pixelHeight)/pixelHeight) * heightSize * camera.transform.up +
+                    nearplanePos;
+
+                ray = new Ray(cameraPos, pixelPos - cameraPos);
+
+                Color pixelColor = backgroundColor;
+
+                for (int i = 0; i < totalTriangles; i++)
+                {
+                    Vector3 v1 = vertices[triangles[3*i]];
+                    Vector3 v2 = vertices[triangles[3*i + 1]];
+                    Vector3 v3 = vertices[triangles[3*i + 2]];
+
+                    if (Intersect(v1, v2, v3, ray)) {
+                        pixelColor = Color.Lerp(minColor, maxColor, pixelResolutionRateNormalized[i]);
+                        break;
+                    }
+                }
+
+                raytracedTexture.SetPixel(x,y, pixelColor);
+            }
+        }
+        raytracedTexture.Apply();
+
+        byte[] textureBytes = raytracedTexture.EncodeToJPG();
+        System.IO.File.WriteAllBytes(filePath, textureBytes);
 
         Graphics.Blit(raytracedTexture, result);
 
@@ -179,7 +422,13 @@ public class RaytracingEditor : Editor {
 
         if (GUILayout.Button("Raytrace"))
         {
-            editorObj.Raytrace();
+            if (editorObj.raytracingMode == RaytracingMode.RandomColors)
+            {
+                editorObj.RaytraceUsingRandomColors();
+            } else {
+                editorObj.RaytraceForResolutionRate();
+            }   
+            
         }
 
         editorObj.filePath = EditorGUILayout.TextField("Path:", editorObj.filePath);
